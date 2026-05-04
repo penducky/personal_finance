@@ -1,0 +1,103 @@
+name: Terraform Plan
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/**'
+
+jobs:
+  terraform_plan:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    # Use OIDC to connect to AWS
+    permissions:
+      id-token: write
+      contents: read
+
+    defaults:
+      run:
+        working-directory: ${{ vars.TF_WORKING_DIR }}
+
+    steps:
+        # Get the code
+      - name: Checkout
+        uses: actions/checkout@v4
+
+        # Login to AWS using OIDC
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+        # Setup Terraform with disabled wrapper for the output
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.14.6
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        id: init
+        run: terraform init -reconfigure
+
+      - name: Terraform Format
+        id: fmt
+        run: terraform fmt
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -var 'ecr_repository=plan'
+
+  docker_build:  
+    runs-on: ubuntu-latest
+    environment: dev
+
+    # Use OIDC to connect to AWS
+    permissions:
+      id-token: write
+      contents: read
+      
+    steps:
+        # Login to AWS using OIDC
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image (Dry Run)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./test-api
+          load: true # Load the image into the Docker cache
+          push: false # Prevents pushing the image to a registry
+          tags: app:test
+
+      - name: Execute Tests
+        run: |
+          docker run -d --rm app:test
+
+          sleep 10
+
+          docker rm -f api-test
