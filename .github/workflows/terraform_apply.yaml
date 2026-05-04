@@ -20,6 +20,11 @@ on:
         description: Tag to apply to images.
         default: test
         type: string
+  push:
+    branches:
+      - workflows
+    paths:
+      - '.github/workflows/*'
 
 jobs:
   terraform_apply:
