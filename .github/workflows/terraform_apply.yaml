@@ -1,18 +1,6 @@
 name: Terraform Apply and Docker Push
 on:
   workflow_dispatch:
-    inputs:
-      environment:
-        description: Environment to build to
-        default: dev
-        type: choice
-        options:
-          - dev
-          - prod
-      image_tag:
-        description: Tag to apply to images.
-        default: test
-        type: string
   push:
       branches:
       - workflows
@@ -22,7 +10,7 @@ on:
 jobs:
   terraform_apply:
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    environment: dev
     outputs:
       ecr_repository: ${{ steps.terraform-outputs.outputs.ECR_REPOSITORY }}
       ecs_cluster_name: ${{ steps.terraform-outputs.outputs.ECS_CLUSTER_NAME }}
@@ -97,7 +85,7 @@ jobs:
 
   docker_push:  
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    environment: dev
 
     # Use OIDC to connect to AWS
     permissions:
