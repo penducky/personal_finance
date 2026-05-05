@@ -57,7 +57,7 @@ jobs:
         id: plan
         run: |
           terraform plan \
-            -var 'ecr_repository=plan'
+            -var-file=dev.tfvars
 
   docker_build:  
     runs-on: ubuntu-latest

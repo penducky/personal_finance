@@ -9,22 +9,15 @@ on:
         options:
           - dev
           - prod
-      aws_account_id:
-        description: AWS Account ID
-        type: string
-      aws_region:
-        description: Target AWS Region
-        default: "us-east-1"
-        type: string
       image_tag:
         description: Tag to apply to images.
         default: test
         type: string
   push:
-    branches:
+      branches:
       - workflows
-    paths:
-      - '.github/workflows/*'
+      paths:
+        - '.github/workflows/*'
 
 jobs:
   terraform_apply:
@@ -35,10 +28,14 @@ jobs:
       ecs_cluster_name: ${{ steps.terraform-outputs.outputs.ECS_CLUSTER_NAME }}
       ecs_service_name: ${{ steps.terraform-outputs.outputs.ECS_SERVICE_NAME }}
       ecs_task_definition_family: ${{ steps.terraform-outputs.outputs.ECS_TASK_DEFINITION_FAMILY }}
+      
     # Use OIDC to connect to AWS
     permissions:
       id-token: write
       contents: read
+
+    env:
+      environment: dev
 
     defaults:
       run:
@@ -56,6 +53,13 @@ jobs:
           role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      # - name: Configure AWS Credentials (Local)
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: us-east-1
+
         # Setup Terraform with disabled wrapper for the output
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -69,7 +73,7 @@ jobs:
 
       - name: Terraform Format
         id: fmt
-        run: terraform fmt
+        run: terraform fmt -check
 
       - name: Terraform Validate
         id: validate
@@ -79,8 +83,9 @@ jobs:
         id: apply
         run: |
           terraform apply \
+            -var-file=${{ env.environment }}.tfvars \
             -auto-approve 
-
+            
       - name: Terraform Outputs
         id: terraform-outputs
         run: |
@@ -119,10 +124,19 @@ jobs:
           role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      # - name: Configure AWS Credentials (Local)
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: us-east-1
+
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
 
       - name: Build, tag, and push image to Amazon ECR
         id: build-publish
@@ -130,7 +144,7 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ needs.terraform_apply.outputs.ecr_repository }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_TAG: test
         run: |
           docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
