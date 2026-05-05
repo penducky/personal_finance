@@ -1,0 +1,160 @@
+name: Terraform Apply and Docker Push
+on:
+  workflow_dispatch:
+  push:
+      branches:
+      - workflows
+      paths:
+        - '.github/workflows/*'
+
+jobs:
+  terraform_apply:
+    runs-on: ubuntu-latest
+    environment: dev
+    outputs:
+      ecr_repository: ${{ steps.terraform-outputs.outputs.ECR_REPOSITORY }}
+      ecs_cluster_name: ${{ steps.terraform-outputs.outputs.ECS_CLUSTER_NAME }}
+      ecs_service_name: ${{ steps.terraform-outputs.outputs.ECS_SERVICE_NAME }}
+      ecs_task_definition_family: ${{ steps.terraform-outputs.outputs.ECS_TASK_DEFINITION_FAMILY }}
+      
+    # Use OIDC to connect to AWS
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      environment: dev
+
+    defaults:
+      run:
+        working-directory: ${{ vars.TF_WORKING_DIR }}
+
+    steps:
+        # Get the code
+      - name: Checkout
+        uses: actions/checkout@v4
+
+        # Login to AWS using OIDC
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # - name: Configure AWS Credentials (Local)
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: us-east-1
+
+        # Setup Terraform with disabled wrapper for the output
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.14.6
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        id: init
+        run: terraform init -reconfigure
+
+      - name: Terraform Format
+        id: fmt
+        run: terraform fmt -check
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate
+
+      - name: Terraform Apply
+        id: apply
+        run: |
+          terraform apply \
+            -var-file=${{ env.environment }}.tfvars \
+            -auto-approve 
+            
+      - name: Terraform Outputs
+        id: terraform-outputs
+        run: |
+          echo ECR_REPOSITORY=$(terraform output -raw ecr_repository) >> $GITHUB_OUTPUT
+          echo ECS_CLUSTER_NAME=$(terraform output -raw ecs_cluster_name) >> $GITHUB_OUTPUT
+          echo ECS_SERVICE_NAME=$(terraform output -raw ecs_service_name) >> $GITHUB_OUTPUT
+          echo ECS_TASK_DEFINITION_FAMILY=$(terraform output -raw ecs_task_definition_family) >> $GITHUB_OUTPUT
+
+
+  docker_push:  
+    runs-on: ubuntu-latest
+    environment: dev
+
+    # Use OIDC to connect to AWS
+    permissions:
+      id-token: write
+      contents: read
+
+    defaults:
+      run:
+        working-directory: ${{ vars.TEST_WORKING_DIR }}
+
+    outputs:
+      image_tag: ${{ steps.build-publish.outputs.image_tag }}
+      full_image: ${{ steps.build-publish.outputs.full_image }}
+      
+    needs: terraform_apply
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+        # Login to AWS using OIDC
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # - name: Configure AWS Credentials (Local)
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: us-east-1
+
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-publish
+        shell: bash
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ needs.terraform_apply.outputs.ecr_repository }}
+          IMAGE_TAG: test
+        run: |
+          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "IMAGE $IMAGE_TAG is pushed to $ECR_REGISTRY/$ECR_REPOSITORY"
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "full_image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ needs.terraform_apply.outputs.ecs_task_definition_family }} \
+            --query taskDefinition > task-definition.json
+          
+      - name: Render Amazon ECS task definition
+        id: render-container
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ vars.TEST_WORKING_DIR }}task-definition.json
+          container-name: nginx
+          image: ${{ steps.build-publish.outputs.full_image }}
+
+      - name: Deploy to Amazon ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-container.outputs.task-definition }}
+          service: ${{ needs.terraform_apply.outputs.ecs_service_name }}
+          cluster: ${{ needs.terraform_apply.outputs.ecs_cluster_name }}
